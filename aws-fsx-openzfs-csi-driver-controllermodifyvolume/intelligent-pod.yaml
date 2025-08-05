@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: intelligent-pod
+  annotations:
+    fsx.csi.aws.com/intelligent-tiering: "enabled"
+    fsx.csi.aws.com/compression: "zstd"
+spec:
+  containers:
+  - name: intelligent-container
+    image: centos:7
+    command: ["/bin/sh"]
+    args: ["-c", "
+      echo 'AWS SDK v2 with Intelligent Tiering!' > /data/intelligent-test.txt;
+      dd if=/dev/zero of=/data/compressed-file.dat bs=1M count=10;
+      echo 'Compression: ZSTD, RecordSize: 128K' > /data/tiering-info.txt;
+      ls -la /data/;
+      sleep 3600
+    "]
+    volumeMounts:
+    - name: intelligent-storage
+      mountPath: /data
+    env:
+    - name: FSX_COMPRESSION
+      value: "zstd"
+    - name: FSX_RECORD_SIZE
+      value: "128k"
+  volumes:
+  - name: intelligent-storage
+    persistentVolumeClaim:
+      claimName: fsx-intelligent-claim

@@ -1,0 +1,22 @@
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: fsx-intelligent-sc
+provisioner: fsx.openzfs.csi.aws.com
+parameters:
+  ResourceType: "filesystem"
+  DeploymentType: '"SINGLE_AZ_1"'
+  ThroughputCapacity: '64'
+  SubnetIds: '["subnet-016affca9638a1e61"]'
+  SkipFinalBackupOnDeletion: 'true'
+  OptionsOnDeletion: '["DELETE_CHILD_VOLUMES_AND_SNAPSHOTS"]'
+  RootVolumeConfiguration: '{"DataCompressionType": "ZSTD", "RecordSizeKiB": 128, "NfsExports": [{"ClientConfigurations": [{"Clients": "*", "Options": ["rw","crossmnt"]}]}]}'
+  SecurityGroupIds: '["sg-004e025204e2a0a25"]'
+  Tags: '[{"Key": "IntelligentTiering", "Value": "enabled"}, {"Key": "Compression", "Value": "ZSTD"}]'
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+mountOptions:
+  - nfsvers=4.1
+  - rsize=1048576
+  - wsize=1048576
+  - timeo=600

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fsx-intelligent-claim
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: fsx-intelligent-sc
+  resources:
+    requests:
+      storage: 64Gi
