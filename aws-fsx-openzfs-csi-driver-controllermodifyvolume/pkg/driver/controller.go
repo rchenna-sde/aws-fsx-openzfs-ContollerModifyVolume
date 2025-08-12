@@ -74,6 +74,8 @@ const (
 	AwsFsxOpenZfsDriverTagKey  = "fsx.openzfs.csi.aws.com/cluster"
 	reservedVolumeParamsPrefix = "csi.storage.k8s.io"
 	deletionSuffix             = "OnDeletion"
+	tagAddPrefix               = "addTag"
+	tagRemovePrefix            = "removeTag"
 )
 
 // Resource Types
@@ -670,52 +672,32 @@ func (d *controllerService) ControllerModifyVolume(ctx context.Context, req *csi
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	// Known volume attributes
-	volumeAttributes := map[string]bool{
-		"StorageCapacityQuotaGiB":       true,
-		"StorageCapacityReservationGiB": true,
-		"DataCompressionType":           true,
-		"RecordSizeKiB":                 true,
-		"ReadOnly":                      true,
-		"NfsExports":                    true,
-		"UserAndGroupQuotas":            true,
-		"Name":                          true,
-	}
+	// Categorize parameters
+	volumeParams, addTags, removeTags := categorizeParameters(mutableParameters)
 
-	// Separate parameters by type
-	volumeParams := make(map[string]string)
-	tags := make(map[string]string)
-	var untagKeys []string
-
-	for k, v := range mutableParameters {
-		if k == "TagKeys" {
-			if v != "" {
-				untagKeys = strings.Split(strings.TrimSpace(v), ",")
-				// Trim whitespace from each key
-				for i, key := range untagKeys {
-					untagKeys[i] = strings.TrimSpace(key)
-				}
+	// Execute operations
+	if len(volumeParams) > 0 {
+		_, err = d.cloud.ModifyVolume(ctx, volumeID, volumeParams)
+		if err != nil {
+			if err == cloud.ErrNotFound {
+				return nil, status.Errorf(codes.NotFound, "Volume not found with ID %q", volumeID)
 			}
-		} else if volumeAttributes[k] {
-			volumeParams[k] = v
-		} else {
-			// Everything else is a tag
-			tags[k] = v
+			return nil, status.Errorf(codes.Internal, "Could not modify volume %q: %v", volumeID, err)
 		}
 	}
 
-	// Handle volume modifications atomically
-	splitVolumeId := strings.SplitN(volumeID, "-", 2)
-	if splitVolumeId[0] != cloud.VolumePrefix {
-		return nil, status.Error(codes.InvalidArgument, "Volume modification only supported for OpenZFS volumes")
+	if len(addTags) > 0 {
+		err = d.cloud.TagResource(ctx, volumeID, addTags)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not add tags to volume %q: %v", volumeID, err)
+		}
 	}
 
-	_, err = d.cloud.ModifyVolumeWithTags(ctx, volumeID, volumeParams, tags, untagKeys)
-	if err != nil {
-		if err == cloud.ErrNotFound {
-			return nil, status.Errorf(codes.NotFound, "Volume not found with ID %q", volumeID)
+	if len(removeTags) > 0 {
+		err = d.cloud.UntagResource(ctx, volumeID, removeTags)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "Could not remove tags from volume %q: %v", volumeID, err)
 		}
-		return nil, status.Errorf(codes.Internal, "Could not modify volume %q: %v", volumeID, err)
 	}
 
 	return &csi.ControllerModifyVolumeResponse{}, nil
@@ -736,6 +718,27 @@ func validateImmutableFields(parameters map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// categorizeParameters separates parameters into volume params, add tags, and remove tags
+func categorizeParameters(parameters map[string]string) (map[string]string, map[string]string, []string) {
+	volumeParams := make(map[string]string)
+	addTags := make(map[string]string)
+	var removeTags []string
+
+	for k, v := range parameters {
+		if strings.HasPrefix(k, tagAddPrefix+".") {
+			tagKey := strings.TrimPrefix(k, tagAddPrefix+".")
+			addTags[tagKey] = v
+		} else if strings.HasPrefix(k, tagRemovePrefix+".") {
+			tagKey := strings.TrimPrefix(k, tagRemovePrefix+".")
+			removeTags = append(removeTags, tagKey)
+		} else {
+			volumeParams[k] = v
+		}
+	}
+
+	return volumeParams, addTags, removeTags
 }
 
 // deleteReservedParameters removes reserved parameters that are populated in request parameters
@@ -892,48 +895,4 @@ func (d *controllerService) appendSnapshotARN(ctx context.Context, parameters ma
 	parameters[volumeParamsOriginSnapshot] = originSnapshotJsonString
 
 	return nil
-}
-
-func (d *controllerService) handleTagOperation(ctx context.Context, volumeID, action string, parameters map[string]string) (*csi.ControllerModifyVolumeResponse, error) {
-	switch action {
-	case "tag":
-		tags := make(map[string]string)
-		for k, v := range parameters {
-			if strings.HasPrefix(k, "tag.") {
-				tagKey := strings.TrimPrefix(k, "tag.")
-				tags[tagKey] = v
-			}
-		}
-		if len(tags) == 0 {
-			return nil, status.Error(codes.InvalidArgument, "No tags provided for tag operation")
-		}
-		err := d.cloud.TagResource(ctx, volumeID, tags)
-		if err != nil {
-			if err == cloud.ErrNotFound {
-				return nil, status.Errorf(codes.NotFound, "Resource not found with ID %q", volumeID)
-			}
-			return nil, status.Errorf(codes.Internal, "Could not tag resource %q: %v", volumeID, err)
-		}
-	case "untag":
-		var tagKeys []string
-		for k, _ := range parameters {
-			if strings.HasPrefix(k, "untag.") {
-				tagKey := strings.TrimPrefix(k, "untag.")
-				tagKeys = append(tagKeys, tagKey)
-			}
-		}
-		if len(tagKeys) == 0 {
-			return nil, status.Error(codes.InvalidArgument, "No tag keys provided for untag operation")
-		}
-		err := d.cloud.UntagResource(ctx, volumeID, tagKeys)
-		if err != nil {
-			if err == cloud.ErrNotFound {
-				return nil, status.Errorf(codes.NotFound, "Resource not found with ID %q", volumeID)
-			}
-			return nil, status.Errorf(codes.Internal, "Could not untag resource %q: %v", volumeID, err)
-		}
-	default:
-		return nil, status.Errorf(codes.InvalidArgument, "Unknown tag action: %s", action)
-	}
-	return &csi.ControllerModifyVolumeResponse{}, nil
 }

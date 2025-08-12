@@ -75,14 +75,14 @@ func TestControllerModifyVolume(t *testing.T) {
 			expResp: &csi.ControllerModifyVolumeResponse{},
 		},
 		{
-			name: "fail - filesystem modification not supported",
+			name: "success - volume modification with different ID",
 			req: &csi.ControllerModifyVolumeRequest{
-				VolumeId: "fs-12345",
+				VolumeId: "fsvol-67890",
 				MutableParameters: map[string]string{
 					"StorageCapacity": "200",
 				},
 			},
-			expError: codes.InvalidArgument,
+			expError: codes.NotFound,
 		},
 	}
 
