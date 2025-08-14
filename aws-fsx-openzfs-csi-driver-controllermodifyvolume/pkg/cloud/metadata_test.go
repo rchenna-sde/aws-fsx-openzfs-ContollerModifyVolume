@@ -53,6 +53,8 @@ func TestNewMetadataService(t *testing.T) {
 		clientsetReactors                func(*fake.Clientset)
 		getInstanceIdentityDocumentValue imds.InstanceIdentityDocument
 		getInstanceIdentityDocumentError error
+		getMetadataOutput                *imds.GetMetadataOutput
+		getMetadataError                 error
 		invalidInstanceIdentityDocument  bool
 		expectedErr                      error
 		node                             v1.Node
@@ -67,6 +69,9 @@ func TestNewMetadataService(t *testing.T) {
 				Region:           stdRegion,
 				AvailabilityZone: stdAvailabilityZone,
 			},
+			getMetadataOutput: &imds.GetMetadataOutput{
+				Content: createReadCloserFromString(stdInstanceID),
+			},
 			expectedErr: nil,
 		},
 		// TODO: Once topology is implemented, add test cases for kubernetes metadata
@@ -78,12 +83,14 @@ func TestNewMetadataService(t *testing.T) {
 					return true, nil, fmt.Errorf("client failure")
 				})
 			},
-			expectedErr:    fmt.Errorf("error getting Node %s: client failure", nodeName),
-			nodeNameEnvVar: nodeName,
+			getMetadataError: fmt.Errorf("IMDS not available"),
+			expectedErr:      fmt.Errorf("error getting Node %s: client failure", nodeName),
+			nodeNameEnvVar:   nodeName,
 		},
 		{
 			name:                 "failure: metadata not available, node name env var not set",
 			ec2metadataAvailable: false,
+			getMetadataError:     fmt.Errorf("IMDS not available"),
 			expectedErr:          fmt.Errorf("CSI_NODE_NAME env var not set"),
 			nodeNameEnvVar:       "",
 		},
@@ -91,6 +98,7 @@ func TestNewMetadataService(t *testing.T) {
 			name:                             "fail: GetInstanceIdentityDocument returned error",
 			ec2metadataAvailable:             true,
 			getInstanceIdentityDocumentError: fmt.Errorf("foo"),
+			getMetadataError:                 fmt.Errorf("foo"),
 			expectedErr:                      fmt.Errorf("error getting Node %s: nodes \"%s\" not found", nodeName, nodeName),
 			nodeNameEnvVar:                   nodeName,
 		},
@@ -103,8 +111,11 @@ func TestNewMetadataService(t *testing.T) {
 				Region:           stdRegion,
 				AvailabilityZone: stdAvailabilityZone,
 			},
+			getMetadataOutput: &imds.GetMetadataOutput{
+				Content: createReadCloserFromString(""),
+			},
 			invalidInstanceIdentityDocument: true,
-			expectedErr:                     fmt.Errorf("could not get valid EC2 instance ID"),
+			expectedErr:                     fmt.Errorf("could not get valid instance ID from IMDS"),
 		},
 		{
 			name:                 "fail: GetInstanceIdentityDocument returned empty az",
@@ -115,8 +126,11 @@ func TestNewMetadataService(t *testing.T) {
 				Region:           stdRegion,
 				AvailabilityZone: "",
 			},
+			getMetadataOutput: &imds.GetMetadataOutput{
+				Content: createReadCloserFromString(stdInstanceID),
+			},
 			invalidInstanceIdentityDocument: true,
-			expectedErr:                     fmt.Errorf("could not get valid EC2 availability zone"),
+			expectedErr:                     fmt.Errorf("could not get valid availability zone from IMDS"),
 		},
 	}
 
@@ -129,36 +143,27 @@ func TestNewMetadataService(t *testing.T) {
 			}
 
 			mockCtrl := gomock.NewController(t)
-			mockEC2Metadata := mocks.NewMockEC2Metadata(mockCtrl)
+			mockIMDS := mocks.NewMockIMDS(mockCtrl)
 
-			ec2MetadataClient := func() (EC2Metadata, error) {
-				return mockEC2Metadata, nil
+			imdsClient := func() (IMDS, error) {
+				return mockIMDS, nil
 			}
 			k8sAPIClient := func() (kubernetes.Interface, error) { clientsetInitialized = true; return clientset, nil }
 
 			if tc.ec2metadataAvailable {
 				// Mock GetMetadata for instance-id check (initial availability check)
-				instanceIDOutput := &imds.GetMetadataOutput{}
-				if tc.getInstanceIdentityDocumentError == nil {
-					instanceIDOutput.Content = createReadCloserFromString(tc.getInstanceIdentityDocumentValue.InstanceID)
-				}
-				mockEC2Metadata.EXPECT().GetMetadata(gomock.Any(), gomock.Eq(&imds.GetMetadataInput{Path: "instance-id"})).Return(instanceIDOutput, tc.getInstanceIdentityDocumentError).AnyTimes()
+				mockIMDS.EXPECT().GetMetadata(gomock.Any(), gomock.Eq(&imds.GetMetadataInput{Path: "instance-id"})).Return(tc.getMetadataOutput, tc.getMetadataError).AnyTimes()
 
-				// If first call succeeds, expect more calls for other metadata
+				// If first call succeeds, expect GetInstanceIdentityDocument call
 				if tc.getInstanceIdentityDocumentError == nil {
-					// Mock GetMetadata for instance-type
-					instanceTypeOutput := &imds.GetMetadataOutput{}
-					instanceTypeOutput.Content = createReadCloserFromString(tc.getInstanceIdentityDocumentValue.InstanceType)
-					mockEC2Metadata.EXPECT().GetMetadata(gomock.Any(), gomock.Eq(&imds.GetMetadataInput{Path: "instance-type"})).Return(instanceTypeOutput, nil).AnyTimes()
-
-					// Mock GetMetadata for availability-zone
-					azOutput := &imds.GetMetadataOutput{}
-					azOutput.Content = createReadCloserFromString(tc.getInstanceIdentityDocumentValue.AvailabilityZone)
-					mockEC2Metadata.EXPECT().GetMetadata(gomock.Any(), gomock.Eq(&imds.GetMetadataInput{Path: "placement/availability-zone"})).Return(azOutput, nil).AnyTimes()
+					docOutput := &imds.GetInstanceIdentityDocumentOutput{
+						InstanceIdentityDocument: tc.getInstanceIdentityDocumentValue,
+					}
+					mockIMDS.EXPECT().GetInstanceIdentityDocument(gomock.Any(), gomock.Any()).Return(docOutput, nil).AnyTimes()
 				}
 			} else {
-				// Simulate EC2 metadata not being available by returning an error
-				mockEC2Metadata.EXPECT().GetMetadata(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("ec2 metadata not available")).AnyTimes()
+				// Simulate IMDS not being available by returning an error
+				mockIMDS.EXPECT().GetMetadata(gomock.Any(), gomock.Any()).Return(nil, tc.getMetadataError).AnyTimes()
 			}
 
 			if tc.ec2metadataAvailable && tc.getInstanceIdentityDocumentError == nil && !tc.invalidInstanceIdentityDocument {
@@ -176,7 +181,7 @@ func TestNewMetadataService(t *testing.T) {
 			}
 
 			var m MetadataService
-			m, err = NewMetadataService(ec2MetadataClient, k8sAPIClient, stdRegion)
+			m, err = NewMetadataService(imdsClient, k8sAPIClient, stdRegion)
 
 			if err != nil {
 				if tc.expectedErr == nil {
