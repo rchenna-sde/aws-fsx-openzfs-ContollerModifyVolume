@@ -38,8 +38,8 @@ func TestControllerModifyVolume(t *testing.T) {
 			req: &csi.ControllerModifyVolumeRequest{
 				VolumeId: "fsvol-12345",
 				MutableParameters: map[string]string{
-					"environment": "test",
-					"team":        "dev",
+					"addTag.environment": "test",
+					"addTag.team":        "dev",
 				},
 			},
 			expResp: &csi.ControllerModifyVolumeResponse{},
@@ -68,8 +68,8 @@ func TestControllerModifyVolume(t *testing.T) {
 				VolumeId: "fsvol-12345",
 				MutableParameters: map[string]string{
 					"StorageCapacityQuotaGiB": "1000",
-					"environment":             "production",
-					"team":                    "platform",
+					"addTag.environment":      "production",
+					"addTag.team":             "platform",
 				},
 			},
 			expResp: &csi.ControllerModifyVolumeResponse{},
@@ -79,7 +79,7 @@ func TestControllerModifyVolume(t *testing.T) {
 			req: &csi.ControllerModifyVolumeRequest{
 				VolumeId: "fsvol-67890",
 				MutableParameters: map[string]string{
-					"StorageCapacity": "200",
+					"StorageCapacityQuotaGiB": "200",
 				},
 			},
 			expError: codes.NotFound,
@@ -148,7 +148,7 @@ func TestVolumeParameterModification(t *testing.T) {
 			parameters: map[string]string{
 				"StorageCapacityQuotaGiB": "1000",
 				"DataCompressionType":     "ZSTD",
-				"env":                     "prod",
+				"addTag.env":              "prod",
 			},
 			expectPass: true,
 		},

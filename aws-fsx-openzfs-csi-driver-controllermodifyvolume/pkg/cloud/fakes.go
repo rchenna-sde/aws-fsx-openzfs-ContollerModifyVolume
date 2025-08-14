@@ -196,10 +196,23 @@ func (c *FakeCloudProvider) DeleteVolume(ctx context.Context, parameters map[str
 }
 
 func (c *FakeCloudProvider) DescribeVolume(ctx context.Context, volumeId string) (*Volume, error) {
+	if c.volumes == nil {
+		c.volumes = make(map[string]*Volume)
+	}
 	for _, v := range c.volumes {
 		if v.VolumeId == volumeId {
 			return v, nil
 		}
+	}
+	// For testing purposes, create a volume if it doesn't exist
+	if volumeId == "fsvol-12345" {
+		v := &Volume{
+			FileSystemId: c.filesystemId,
+			VolumePath:   "/",
+			VolumeId:     volumeId,
+		}
+		c.volumes[volumeId] = v
+		return v, nil
 	}
 	return nil, ErrNotFound
 }

@@ -666,16 +666,24 @@ func (d *controllerService) ControllerModifyVolume(ctx context.Context, req *csi
 
 	deleteReservedParameters(mutableParameters)
 
-	// Validate immutable fields
-	err := validateImmutableFields(mutableParameters)
+	// Validate parameter syntax first
+	err := d.validateParameterSyntax(mutableParameters)
 	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
+		return nil, err
 	}
 
-	// Categorize parameters
+	// Categorize parameters after validation
 	volumeParams, addTags, removeTags := categorizeParameters(mutableParameters)
 
-	// Execute operations
+	// Validate resource exists for tag operations
+	if len(addTags) > 0 || len(removeTags) > 0 {
+		_, err = d.getResourceARN(ctx, volumeID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Execute all operations - fail fast on any error
 	if len(volumeParams) > 0 {
 		_, err = d.cloud.ModifyVolume(ctx, volumeID, volumeParams)
 		if err != nil {
@@ -703,18 +711,142 @@ func (d *controllerService) ControllerModifyVolume(ctx context.Context, req *csi
 	return &csi.ControllerModifyVolumeResponse{}, nil
 }
 
-// validateImmutableFields checks if any immutable fields are present in parameters
-func validateImmutableFields(parameters map[string]string) error {
-	immutableFields := map[string]bool{
-		"CopyTagsToSnapshots":                      true,
-		"CreateOpenZFSOriginSnapshotConfiguration": true,
-		"ParentVolumeId":                           true,
-		"VolumeType":                               true,
+// getResourceARN retrieves the resource ARN for tag operations
+func (d *controllerService) getResourceARN(ctx context.Context, volumeID string) (string, error) {
+	// Validate volume exists first
+	splitVolumeId := strings.SplitN(volumeID, "-", 2)
+	if splitVolumeId[0] == cloud.FilesystemPrefix {
+		_, err := d.cloud.DescribeFileSystem(ctx, volumeID)
+		if err != nil {
+			if err == cloud.ErrNotFound {
+				return "", status.Errorf(codes.NotFound, "Filesystem not found with ID %q", volumeID)
+			}
+			return "", status.Errorf(codes.Internal, "Could not get filesystem %q: %v", volumeID, err)
+		}
+	} else if splitVolumeId[0] == cloud.VolumePrefix {
+		_, err := d.cloud.DescribeVolume(ctx, volumeID)
+		if err != nil {
+			if err == cloud.ErrNotFound {
+				return "", status.Errorf(codes.NotFound, "Volume not found with ID %q", volumeID)
+			}
+			return "", status.Errorf(codes.Internal, "Could not get volume %q: %v", volumeID, err)
+		}
+	} else {
+		return "", status.Errorf(codes.InvalidArgument, "Invalid volume ID format: %q", volumeID)
 	}
 
-	for key := range parameters {
-		if immutableFields[key] {
-			return fmt.Errorf("parameter %s is immutable and cannot be modified", key)
+	// Return volumeID - the cloud layer's TagResource/UntagResource methods handle ARN resolution
+	return volumeID, nil
+}
+
+// validateParameterSyntax validates parameter syntax and format
+func (d *controllerService) validateParameterSyntax(parameters map[string]string) error {
+	// Separate parameters for validation
+	volumeParams := make(map[string]string)
+	addTags := make(map[string]string)
+	var removeTags []string
+
+	for k, v := range parameters {
+		if strings.HasPrefix(k, tagAddPrefix+".") {
+			tagKey := strings.TrimPrefix(k, tagAddPrefix+".")
+			addTags[tagKey] = v
+		} else if strings.HasPrefix(k, tagRemovePrefix+".") {
+			tagKey := strings.TrimPrefix(k, tagRemovePrefix+".")
+			removeTags = append(removeTags, tagKey)
+		} else {
+			volumeParams[k] = v
+		}
+	}
+
+	// Validate volume parameters syntax
+	if len(volumeParams) > 0 {
+		err := d.validateVolumeParameterSyntax(volumeParams)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Validate tag parameters syntax
+	if len(addTags) > 0 {
+		err := d.validateTagParameterSyntax(addTags)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Validate remove tags syntax
+	if len(removeTags) > 0 {
+		err := d.validateRemoveTagSyntax(removeTags)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateVolumeParameterSyntax validates volume parameter syntax only
+func (d *controllerService) validateVolumeParameterSyntax(params map[string]string) error {
+	validParams := map[string]bool{
+		"StorageCapacityQuotaGiB": true,
+		"DataCompressionType":     true,
+		"RecordSizeKiB":           true,
+		"ReadOnly":                true,
+		"UserAndGroupQuotas":      true,
+	}
+
+	for key, value := range params {
+		if !validParams[key] {
+			return status.Errorf(codes.InvalidArgument, "Invalid volume parameter: %s", key)
+		}
+
+		// Validate specific parameter values
+		switch key {
+		case "StorageCapacityQuotaGiB":
+			if capacity, err := strconv.Atoi(value); err != nil || capacity < 1 {
+				return status.Errorf(codes.InvalidArgument, "Invalid StorageCapacityQuotaGiB: %s", value)
+			}
+		case "DataCompressionType":
+			if value != "NONE" && value != "ZSTD" && value != "LZ4" {
+				return status.Errorf(codes.InvalidArgument, "Invalid DataCompressionType: %s", value)
+			}
+		case "RecordSizeKiB":
+			if size, err := strconv.Atoi(value); err != nil || size < 1 || size > 1048576 {
+				return status.Errorf(codes.InvalidArgument, "Invalid RecordSizeKiB: %s", value)
+			}
+		case "ReadOnly":
+			if value != "true" && value != "false" {
+				return status.Errorf(codes.InvalidArgument, "Invalid ReadOnly value: %s", value)
+			}
+		}
+	}
+	return nil
+}
+
+// validateTagParameterSyntax validates tag parameter syntax only
+func (d *controllerService) validateTagParameterSyntax(tags map[string]string) error {
+	for key, value := range tags {
+		if len(key) == 0 || len(key) > 128 {
+			return status.Errorf(codes.InvalidArgument, "Invalid tag key length: %s", key)
+		}
+		if len(value) > 256 {
+			return status.Errorf(codes.InvalidArgument, "Invalid tag value length for key %s", key)
+		}
+		if strings.HasPrefix(key, "aws:") {
+			return status.Errorf(codes.InvalidArgument, "Cannot modify AWS reserved tag: %s", key)
+		}
+	}
+	return nil
+}
+
+// validateRemoveTagSyntax validates remove tag syntax only
+func (d *controllerService) validateRemoveTagSyntax(tags []string) error {
+	for _, key := range tags {
+		if len(key) == 0 || len(key) > 128 {
+			return status.Errorf(codes.InvalidArgument, "Invalid tag key length: %s", key)
+		}
+		if strings.HasPrefix(key, "aws:") {
+			return status.Errorf(codes.InvalidArgument, "Cannot remove AWS reserved tag: %s", key)
 		}
 	}
 	return nil

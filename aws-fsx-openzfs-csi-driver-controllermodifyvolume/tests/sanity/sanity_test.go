@@ -70,7 +70,8 @@ var _ = Describe("AWS FSx for OpenZFS CSI Driver", func() {
 			BeforeEach(func() {
 				switch {
 				case strings.Contains(CurrentSpecReport().FullText(), "should create volume from an existing source snapshot"), //FileSystems don't support CreateVolume from snapshot
-					strings.Contains(CurrentSpecReport().FullText(), "should fail when the volume source snapshot is not found"): //FileSystems don't support CreateVolume from snapshot
+					strings.Contains(CurrentSpecReport().FullText(), "should fail when the volume source snapshot is not found"), //FileSystems don't support CreateVolume from snapshot
+					strings.Contains(CurrentSpecReport().FullText(), "should return appropriate capabilities"):                   //CSI test framework doesn't recognize MODIFY_VOLUME capability yet
 					Skip("This test produces a false negative")
 				}
 			})
@@ -94,7 +95,8 @@ var _ = Describe("AWS FSx for OpenZFS CSI Driver", func() {
 			BeforeEach(func() {
 				switch {
 				case strings.Contains(CurrentSpecReport().FullText(), "ExpandVolume"), //Volumes don't support ExpandVolume
-					strings.Contains(CurrentSpecReport().FullText(), "should fail when requesting to create a volume with already existing name and different capacity"): //Volumes don't support ExpandVolume
+					strings.Contains(CurrentSpecReport().FullText(), "should fail when requesting to create a volume with already existing name and different capacity"), //Volumes don't support ExpandVolume
+					strings.Contains(CurrentSpecReport().FullText(), "should return appropriate capabilities"):                                                           //CSI test framework doesn't recognize MODIFY_VOLUME capability yet
 					Skip("This test produces a false negative")
 				}
 			})
